@@ -1,15 +1,19 @@
 #include "DS18Temp.h"
 
-//#define NODEBUG_PRINT
+#define NODEBUG_PRINT
 #include <debug_print.h>
 
-DS18Temp::DS18Temp(const char* id, uint8_t pin, uint32_t readingInt, uint8_t resolution) : GenericSensor(id)
+#define DS18_STATE_REQUEST_VALUES       1
+#define DS18_STATE_READ_VALUES          2
+
+DS18Temp::DS18Temp(const char* id, uint8_t pin, uint32_t readingInt, uint8_t resolution) : GenericSensor(id, readingInt)
 {
     
-    readings = new DynamicJsonDocument(512);
+    doc = new DynamicJsonDocument(512);
+    readings = doc->to<JsonObject>();
+    ds18array = readings.createNestedArray("ds18");
 
     this->pin = pin;
-    readingInterval = readingInt;
 
     #ifndef NODEBUG_PRINT
     aliveTimer.start(10000);
@@ -17,6 +21,7 @@ DS18Temp::DS18Temp(const char* id, uint8_t pin, uint32_t readingInt, uint8_t res
     #endif
 
     if (resolution < 9 || resolution > 12) resolution = 9;
+    this->resolution = resolution;
 
 }
 
@@ -31,36 +36,43 @@ void byte2hex(char* dst, uint8_t* src, uint8_t length){
 
 
 void DS18Temp::begin(){
-    DeviceAddress a;
-    DEBUG_PRINT("[DS18:begin] start id=%s\n",id);
+    DEBUG_PRINT("[DS18-%s:begin] start id=%s\n",id);
 
     oneWire = new OneWire(pin);
     sensors = new DallasTemperature(oneWire);
 
-    if (!oneWire->search(a)){
-        CONSOLE("[DS18:begin] ERROR: no DS18 oneWire device found\n");
-    } else {
-        char hexadr[17];
-        int i=0;
-        CONSOLE("[DS18:begin] Searching for DS18 sensors\n");
-        do {
-            byte2hex(hexadr,a,8);
-            CONSOLE("%d. addr=%s\n", ++i, hexadr);
-            strncpy(adrs[i], hexadr, 17);
-        } while (oneWire->search(a));
-        CONSOLE("[DS18:begin] Found %d sensors\n",i);
-    } 
-
     sensors->begin();
 
-    readingTimer.start(readingInterval);
+    detectedSensors = sensors->getDeviceCount();
+    sensorCount = detectedSensors;
+
+    if (detectedSensors == 0){
+        CONSOLE("[DS18-%s:begin] ERROR: no DS18 oneWire device found\n",id);
+    } else {
+        CONSOLE("[DS18-%s:begin] Found %d DS18 sensors\n", id, detectedSensors);
+        char hexadr[17];
+        for (uint8_t s=0; s < detectedSensors; s++){
+            DeviceAddress a;
+            if (!sensors->getAddress(a, s)) {
+                CONSOLE("[DS18-%s:begin] Error reading address for device #%d\n",id,s);
+            } else {
+                byte2hex(hexadr,a,8);
+                CONSOLE("  %d. addr=%s\n", s+1, hexadr);
+                strncpy(adrs[s], hexadr, 17);
+            }
+        }
+    }
+
+    sensors->setResolution(resolution);
+
+    readingTimer.start();
     readingTimer.triggerTimeout();
 
     conversionTimer.start(1000/(1 << (12-resolution)));  // higher resolution -> longer conversion time
     conversionTimer.triggerTimeout();
 
     _ready = true;
-    state = 1;
+    state = DS18_STATE_REQUEST_VALUES;
 
 }
 
@@ -68,7 +80,7 @@ void DS18Temp::begin(){
 void DS18Temp::loop(){
     #ifndef NODEBUG_PRINT
     if (aliveTimer.timeout()){
-        DEBUG_PRINT("[DS18:loop] ms=%lu Alive id=%s state=%d\n",millis(),id, state);
+        DEBUG_PRINT("[DS18-%s:loop] ms=%lu Alive id=%s state=%d\n", id, millis(), id, state);
         aliveTimer.reset();
     }
     #endif
@@ -76,52 +88,54 @@ void DS18Temp::loop(){
     GenericSensor::loop();
     if (state == 0) return;
 
-    if (state == 1) {
+    if (state == DS18_STATE_REQUEST_VALUES) {
         if (!readingTimer.timeout()) return;
         readingTimer.reset();
-        state = 2;
+        state = DS18_STATE_READ_VALUES;
         sensors->requestTemperatures(); // Send the command to get temperature readings 
         conversionTimer.reset();
     }
 
-    if (state == 2 && !conversionTimer.timeout()) return;
+    if (state == DS18_STATE_READ_VALUES && !conversionTimer.timeout()) return;
 
-    uint8_t c = sensors->getDS18Count();
-    
-    if (c == 0) {
-        DEBUG_PRINT("[DS18:loop] No DS18 sensors detected.\n" );
-        return;
-    }
+    doc->clear();  // remove previous readings
+    readings = doc->to<JsonObject>();
+    ds18array = readings.createNestedArray("ds18");
 
-    DEBUG_PRINT("[DS18:loop] sensors=%d\n",c);
-
-    readings->clear();  // remove previous readings
-
-    for(uint8_t i=0; i<c; i++){
+    sensorCount = 0;
+    for(uint8_t i=0; i < detectedSensors; i++){
         // read temperature
-        
         float t = sensors->getTempCByIndex(i);
-        DEBUG_PRINT("[reading] i=%d temp=%f\n",i,t);
 
-        // get sensor address
-        uint8_t adr[10];
-        char hexadr[25];
-        sensors->getAddress(&adr[0],i);
+        if (t>DEVICE_DISCONNECTED_C){
+            // get sensor address
+            uint8_t adr[10];
+            char hexadr[25];
+            sensors->getAddress(&adr[0],i);
 
-        byte2hex(hexadr,adr,8);
+            byte2hex(hexadr,adr,8);
 
-        JsonVariant k = readings->getOrAddMember(hexadr);
-        k.set(t);
+            JsonObject k = ds18array.createNestedObject();
+            k["a"] = String(hexadr);    // address
+            k["v"] = t;                 // value
+            k["res"] = resolution;      // resolution
 
-        DEBUG_PRINT("[DS18:loop] i=%d a=%s t=%.3f\n",i,hexadr,t);
-    }
+            DEBUG_PRINT("[DS18-%s:loop] i=%d a=%s t=%.3f\n", id, i, hexadr, t);
+
+            sensorCount++;  // sensor returned value, so lets increase available sensor count
+        } else {
+            DEBUG_PRINT("[DS18-%s:loop] i=%d Error reading value\n", id, i);
+        }
+
+        delay(0);
+    } 
 
     _changed = true;
-    state = 1;
+    state = DS18_STATE_REQUEST_VALUES;
 
     #ifndef NODEBUG_PRINT
-    DEBUG_PRINT("[DS18:loop] readings=\n");
-    serializeJsonPretty(*readings, DEBUG_PORT);
+    DEBUG_PRINT("[DS18-%s:loop] readings=\n", id);
+    serializeJsonPretty(*doc, DEBUG_PORT);
     DEBUG_PRINT("\n");
     #endif
 
