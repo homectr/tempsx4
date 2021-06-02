@@ -16,6 +16,8 @@
 int ports[DS18_PORT_COUNT] = {4,5,13,14,12};  // gpios used with sensors
 DS18Temp *ds18[DS18_PORT_COUNT];
 
+String names[DS18_PORT_COUNT];
+
 HomieNode node("temperature", "Temperature", "temperature");
 
 void loopHandler() {
@@ -39,6 +41,7 @@ void setup() {
 
     // create and intialize sensors
     for (uint8_t i=0; i < DS18_PORT_COUNT; i++){
+        names[i] = "Temperature "+String(i);
         ds18[i] = new DS18Temp(("ds18p"+String(i+1)).c_str(), ports[i], TEMP_INTERVAL, TEMP_PRECISION);
         ds18[i]->begin();
     }
@@ -50,7 +53,7 @@ void setup() {
 
     // configure Homie node properties
     for (uint8_t i=0; i< DS18_PORT_COUNT; i++){
-        node.advertise(("temp"+String(i)).c_str()).setName(("Temperature "+String(i)).c_str()).setDatatype("float").setUnit("ºC");
+        node.advertise(("temp"+String(i)).c_str()).setName(names[i].c_str()).setDatatype("float").setUnit("ºC");
     }
 
 }
