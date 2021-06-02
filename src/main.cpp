@@ -20,6 +20,15 @@ String names[DS18_PORT_COUNT];
 
 HomieNode node("temperature", "Temperature", "temperature");
 
+void onHomieEvent(const HomieEvent& event) {
+  switch(event.type) {
+    case HomieEventType::SENDING_STATISTICS:
+      // Do whatever you want when statistics are sent in normal mode
+      node.setProperty("alive").send(String(millis()));
+      break;
+  }
+}
+
 void loopHandler() {
     for(uint8_t pc = 0; pc < DS18_PORT_COUNT; pc++) {
         delay(10);
@@ -41,19 +50,22 @@ void setup() {
 
     // create and intialize sensors
     for (uint8_t i=0; i < DS18_PORT_COUNT; i++){
-        names[i] = "Temperature "+String(i);
+        names[i] = "Temperature "+String(i+1);
         ds18[i] = new DS18Temp(("ds18p"+String(i+1)).c_str(), ports[i], TEMP_INTERVAL, TEMP_PRECISION);
         ds18[i]->begin();
     }
 
     // configure Homie instance
-    Homie_setFirmware("tempsx4", "1.0.1");
+    Homie_setFirmware("tempx5", "1.1.0");
     Homie.setLoopFunction(loopHandler);
+    Homie.onEvent(onHomieEvent);
     Homie.setup();
+
+    node.advertise("alive").setName("Alive").setFormat("string");
 
     // configure Homie node properties
     for (uint8_t i=0; i< DS18_PORT_COUNT; i++){
-        node.advertise(("temp"+String(i)).c_str()).setName(names[i].c_str()).setDatatype("float").setUnit("ºC");
+        node.advertise(("temp"+String(i+1)).c_str()).setName(names[i].c_str()).setDatatype("float").setUnit("ºC");
     }
 
 }
